@@ -1,0 +1,42 @@
+import express from 'express';
+import { WebSocketServer } from 'ws';
+import { createServer } from 'node:http';
+import { randomBytes, randomUUID, createHash } from 'node:crypto';
+import { readFile, mkdir, writeFile, rename } from 'node:fs/promises';
+import bcrypt from 'bcryptjs';
+import cookie from 'cookie';
+const app=express(),server=createServer(app),wss=new WebSocketServer({server,path:'/ws',maxPayload:16384});
+const DIR=process.env.DATA_DIR||'data',FILE=DIR+'/state.json',MAX=Number(process.env.VM_COUNT||19);
+let db={users:[],sessions:[],requests:[],friends:[],rooms:[]},queue=Promise.resolve();
+await mkdir(DIR,{recursive:true,mode:0o700});
+try{db=JSON.parse(await readFile(FILE,'utf8'))}catch(e){if(e.code!=='ENOENT')throw e}
+const save=()=>{const job=queue.then(async()=>{const tmp=FILE+'.tmp';await writeFile(tmp,JSON.stringify(db),{mode:0o600});await rename(tmp,FILE)});queue=job.catch(console.error);return job};
+await save();
+const hash=s=>createHash('sha256').update(s).digest('hex');
+const identity=req=>{const t=cookie.parse(req.headers.cookie||'').mao;const s=db.sessions.find(x=>x.token===hash(t||'')&&x.exp>Date.now());return s&&db.users.find(x=>x.id===s.uid)};
+const auth=(req,res,next)=>{req.user=identity(req);req.user?next():res.status(401).json({error:'Log in first'})};
+const wrap=fn=>(req,res,next)=>Promise.resolve(fn(req,res)).catch(next);
+const fail=(res,status,error)=>res.status(status).json({error});
+const user=u=>({id:u.id,username:u.username,vm:u.vm});
+const friend=(a,b)=>db.friends.some(pair=>pair.includes(a)&&pair.includes(b));
+const roomData=r=>({...r,members:r.members.map(id=>db.users.find(u=>u.id===id)).filter(Boolean).map(user)});
+app.use(express.json({limit:'32kb'}));
+app.use((req,res,next)=>{if(!['GET','HEAD','OPTIONS'].includes(req.method)){const origin=req.headers.origin;if(origin&&origin!==('https://'+req.headers.host)&&origin!==('http://'+req.headers.host))return fail(res,403,'Invalid origin')}next()});
+app.post('/api/register',wrap(async(req,res)=>{const username=String(req.body.username||'').toLowerCase().trim(),pass=String(req.body.passcode||'');if(!/^[a-z0-9_]{3,24}$/.test(username)||pass.length<8||pass.length>128)return fail(res,400,'Username or passcode invalid');const password=await bcrypt.hash(pass,12);if(db.users.some(u=>u.username===username))return fail(res,409,'Username taken');const vm=Array.from({length:MAX},(_,i)=>i+1).find(n=>!db.users.some(u=>u.vm===n));if(!vm)return fail(res,409,'No unassigned Webtops');const u={id:randomUUID(),username,password,vm};db.users.push(u);await save();return login(res,u)}));
+function login(res,u){const token=randomBytes(32).toString('hex');db.sessions.push({token:hash(token),uid:u.id,exp:Date.now()+1209600000});res.cookie('mao',token,{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:1209600000,path:'/'});save().then(()=>res.json({user:user(u)})).catch(()=>res.status(500).end())}
+app.post('/api/login',wrap(async(req,res)=>{const u=db.users.find(u=>u.username===String(req.body.username||'').trim().toLowerCase());if(!u||!(await bcrypt.compare(String(req.body.passcode||''),u.password)))return fail(res,401,'Invalid credentials');login(res,u)}));
+app.post('/api/logout',auth,wrap(async(req,res)=>{const token=cookie.parse(req.headers.cookie||'').mao;db.sessions=db.sessions.filter(s=>s.token!==hash(token));await save();res.clearCookie('mao');res.json({ok:true})}));
+app.get('/api/me',auth,(req,res)=>res.json({user:user(req.user),vmUrl:'https://vm'+req.user.vm+'.asanib.com'}));
+app.get('/api/people',auth,(req,res)=>res.json({people:db.users.filter(u=>u.id!==req.user.id).map(user)}));
+app.get('/api/social',auth,(req,res)=>res.json({friends:db.friends.filter(f=>f.includes(req.user.id)).map(f=>db.users.find(u=>u.id===f.find(id=>id!==req.user.id))).filter(Boolean).map(user),requests:db.requests.filter(r=>r.to===req.user.id).map(r=>user(db.users.find(u=>u.id===r.from)))}));
+app.post('/api/friends/request',auth,wrap(async(req,res)=>{const target=db.users.find(u=>u.username===req.body.username);if(!target||target.id===req.user.id)return fail(res,404,'User missing');if(friend(target.id,req.user.id))return fail(res,409,'Already friends');if(!db.requests.some(r=>r.from===req.user.id&&r.to===target.id))db.requests.push({from:req.user.id,to:target.id});await save();emit(target.id,{type:'social'});res.json({ok:true})}));
+app.post('/api/friends/accept',auth,wrap(async(req,res)=>{const target=db.users.find(u=>u.username===req.body.username);if(!target||!db.requests.some(r=>r.from===target.id&&r.to===req.user.id))return fail(res,404,'No request');db.requests=db.requests.filter(r=>!(r.from===target.id&&r.to===req.user.id));if(!friend(target.id,req.user.id))db.friends.push([target.id,req.user.id]);await save();emit(target.id,{type:'social'});res.json({ok:true})}));
+app.get('/api/rooms',auth,(req,res)=>res.json({rooms:db.rooms.filter(r=>r.members.includes(req.user.id)).map(roomData)}));
+app.post('/api/rooms',auth,wrap(async(req,res)=>{const name=String(req.body.name||'').trim().slice(0,50);if(!name)return fail(res,400,'Name required');const room={id:randomUUID(),name,members:[req.user.id],messages:[]};db.rooms.push(room);await save();res.json({room:roomData(room)})}));
+app.get('/api/rooms/:id',auth,(req,res)=>{const r=db.rooms.find(r=>r.id===req.params.id&&r.members.includes(req.user.id));r?res.json({room:roomData(r)}):fail(res,404,'Room missing')});
+app.post('/api/rooms/:id/invite',auth,wrap(async(req,res)=>{const r=db.rooms.find(r=>r.id===req.params.id&&r.members.includes(req.user.id)),target=db.users.find(u=>u.username===req.body.username);if(!r||!target)return fail(res,404,'Missing room or user');if(!friend(req.user.id,target.id))return fail(res,403,'Friends only');if(!r.members.includes(target.id))r.members.push(target.id);await save();r.members.forEach(id=>emit(id,{type:'rooms'}));res.json({ok:true})}));
+const sockets=new Map();function emit(id,msg){for(const ws of sockets.get(id)||[])if(ws.readyState===1)ws.send(JSON.stringify(msg))}
+wss.on('connection',(ws,req)=>{const origin=req.headers.origin;if(origin&&!['https://'+req.headers.host,'http://'+req.headers.host].includes(origin)){ws.close(1008);return}const u=identity(req);if(!u){ws.close(1008);return}if(!sockets.has(u.id))sockets.set(u.id,new Set());sockets.get(u.id).add(ws);ws.on('message',async raw=>{let msg;try{msg=JSON.parse(String(raw))}catch{return}const r=db.rooms.find(r=>r.id===msg.roomId&&r.members.includes(u.id));if(!r)return;if(msg.type==='chat'){const body=String(msg.body||'').trim().slice(0,2000);if(!body)return;const entry={id:randomUUID(),username:u.username,body};r.messages.push(entry);r.messages=r.messages.slice(-100);await save();r.members.forEach(id=>emit(id,{type:'chat',roomId:r.id,entry}))}if(msg.type==='signal'&&r.members.includes(msg.to)&&['offer','answer','candidate'].includes(msg.signal?.type))emit(msg.to,{type:'signal',roomId:r.id,from:u.id,signal:msg.signal});if(msg.type==='presence')r.members.filter(id=>id!==u.id).forEach(id=>emit(id,{type:'presence',roomId:r.id,from:u.id,active:!!msg.active}))});ws.on('close',()=>{sockets.get(u.id)?.delete(ws);db.rooms.filter(r=>r.members.includes(u.id)).forEach(r=>r.members.filter(id=>id!==u.id).forEach(id=>emit(id,{type:'presence',roomId:r.id,from:u.id,active:false})))})});
+app.use(express.static('public'));
+app.use((e,req,res,next)=>{console.error(e);res.status(500).json({error:'Server error'})});
+server.listen(Number(process.env.PORT||3000),'127.0.0.1',()=>console.log('Mao on http://127.0.0.1:'+(process.env.PORT||3000)));
