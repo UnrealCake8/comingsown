@@ -9,7 +9,7 @@ React + TypeScript + Vite frontend, Supabase sign-in and social data, and Zoom V
 3. For a complete local app, run `npm run build` then `npm start` (http://127.0.0.1:4000). `npm run dev` runs only the frontend; the authenticated API needs the Node server or Vercel.
 4. On Vercel, use Vite, `npm run build`, and output directory `dist`. Configure the same variables there, then redeploy. `VITE_` values are baked into the build. Zoom credentials and the Supabase service-role key must remain server-only.
 
-Existing `mao` schema tables and VM assignments are retained; no database migration is needed. Calls authenticate through `/api/mao/call/:space`, verify Supabase identity and Space membership, and receive a one-hour HS256 Zoom session JWT. All users join as participants, so no host privileges or recording controls are granted by the token endpoint.
+Existing `mao` schema tables and VM assignments are retained. Before deploying the automatic VM feature, run `supabase/setup-vm-pool.sql` in the Supabase SQL Editor (see `supabase/README.md`). Calls authenticate through `/api/mao/call/:space`, verify Supabase identity and Space membership, and receive a one-hour HS256 Zoom session JWT. All users join as participants, so no host privileges or recording controls are granted by the token endpoint.
 
 ## Calls and desktops
 
@@ -28,3 +28,5 @@ The older `server.js` and `public/app.js` are legacy implementations; the suppor
 - `npm test` checks Zoom JWT signatures, session/user binding, expiry, and missing credentials.
 - `npx playwright install chromium` then `npm run test:ui` checks responsive navigation, call persistence, mute/leave, and preservation of the VM iframe with **mocked account data and Zoom SDK**. Set `CHROMIUM_EXECUTABLE_PATH` to use an installed Chromium instead. These checks do not verify real Zoom media transport.
 - `npm run build` checks TypeScript and the production bundle. Supply `VITE_SUPABASE_PUBLISHABLE_KEY` to include the authenticated app in the build. The Zoom SDK is loaded only when joining a call.
+
+- `npm run test:db` runs the SQL/PLpgSQL setup in a disposable PostgreSQL/PGlite database to check allocation, repeated requests, full pools, disabled VMs, existing assignments, and permissions. It never connects to Supabase. PGlite uses one backend; production multi-session lock contention still needs staging verification.

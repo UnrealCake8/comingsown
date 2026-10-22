@@ -34,6 +34,8 @@ export default function App({ userId }: { userId: string }) {
     [username, setUsername] = useState(""),
     [error, setError] = useState(""),
     [loading, setLoading] = useState(true),
+    [claiming, setClaiming] = useState(false),
+    [vmNotice, setVmNotice] = useState(""),
     [friends, setFriends] = useState<{
       links: { requester_id: string; addressee_id: string; status: string }[];
       people: { user_id: string; username: string }[];
@@ -89,6 +91,24 @@ export default function App({ userId }: { userId: string }) {
       await refresh();
     } catch (e) {
       setError(String(e));
+    }
+  }
+  async function retryVm() {
+    if (claiming) return;
+    setClaiming(true);
+    setVmNotice("");
+    try {
+      const { vm: assigned } = await request<{ vm: number | null }>(
+        "/vm/claim",
+        {},
+      );
+      setVm(assigned);
+      if (assigned === null)
+        setVmNotice("All PCs are still taken. Check back soon.");
+    } catch (e) {
+      setVmNotice(String(e));
+    } finally {
+      setClaiming(false);
     }
   }
   async function createSpace() {
@@ -315,11 +335,19 @@ export default function App({ userId }: { userId: string }) {
                 <div className="desktopbody">
                   <div className="desktopcontent">
                     <Monitor size={48} />
-                    <h3>Your PC is on its way</h3>
+                    <h3>All PCs are taken right now</h3>
                     <p>
-                      You haven’t been assigned a desktop yet. Ask your admin to
-                      connect one.
+                      You’ll get a PC automatically when one is available. You
+                      can still call and chat while you wait.
                     </p>
+                    <button
+                      className="primary"
+                      disabled={claiming}
+                      onClick={() => void retryVm()}
+                    >
+                      {claiming ? "Checking…" : "Check for a PC"}
+                    </button>
+                    {vmNotice && <p role="status">{vmNotice}</p>}
                   </div>
                 </div>
               )}
