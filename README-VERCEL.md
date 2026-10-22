@@ -1,20 +1,30 @@
-# Mao v2 — Vercel build
+# Mao — hang out, chat, and use your PC
 
-This branch introduces a React + TypeScript + Vite frontend and a new social-first interface.
+React + TypeScript + Vite frontend, Supabase sign-in and social data, and Zoom Video SDK calls. The existing Mao logo reference (`public/mao-logo.png`) and wordmark are retained. The image file is not currently tracked in this repository; place the original asset at that path to display it.
 
-## Local preview
+## Setup
 
-```bash
-npm install
-npm run dev
-```
+1. Install Node 22+ and run `npm ci`.
+2. Copy `.env.example` to `.env` and fill in the existing Supabase project values and your **Zoom Video SDK** app key and secret. Meeting SDK credentials cannot be used.
+3. For a complete local app, run `npm run build` then `npm start` (http://127.0.0.1:4000). `npm run dev` runs only the frontend; the authenticated API needs the Node server or Vercel.
+4. On Vercel, use Vite, `npm run build`, and output directory `dist`. Configure the same variables there, then redeploy. `VITE_` values are baked into the build. Zoom credentials and the Supabase service-role key must remain server-only.
 
-## Vercel
+Existing `mao` schema tables and VM assignments are retained; no database migration is needed. Calls authenticate through `/api/mao/call/:space`, verify Supabase identity and Space membership, and receive a one-hour HS256 Zoom session JWT. All users join as participants, so no host privileges or recording controls are granted by the token endpoint.
 
-Import `UnrealCake8/comingsown` and select branch `vercel-build`. Framework preset: Vite. Build command: `npm run build`; output directory: `dist`.
+## Calls and desktops
 
-## Important
+Click **Join the call**, then **Enable audio** to connect your microphone and speakers using an explicit browser gesture. Camera, mute, screen share, received video, and leave controls use Zoom Video SDK. Call errors and browser autoplay recovery are surfaced in the call panel.
 
-This is an **interactive design preview**, not a migrated production application. Spaces and messages are local React state only. Call controls do not access camera or microphone yet. There is no authentication, database, real-time chat, LiveKit integration, or VM embedding in this build. Do not attach the production mao.asanib.com domain until those features are implemented and tested.
+The call component stays mounted when switching between Hang out, My PC, Chat, Friends, and Privacy. Selecting a different Space preserves the current call until you leave. The desktop iframe also stays mounted during navigation. Desktop pop-out opens another tab; keep the Mao tab open for audio. Reloading, closing the Mao tab, or signing out ends the call. Mobile operating systems may suspend background tabs; uninterrupted audio cannot be guaranteed when the browser is suspended.
 
-The Linux VM hosts stay on the Mac; they are not being migrated. The previous Node/Express implementation remains in the repository for reference, but Vercel serves only the new Vite frontend.
+Restricted Video keeps camera publishing disabled. Per-viewer whitelist delivery is not implemented; screen shares are visible to all call participants. This restriction is an application control, not a Zoom token-level publish prohibition.
+
+For real calling, verify with two signed-in Space members on HTTPS, grant browser mic/camera permissions, and allow Zoom media traffic through the network. Confirm two-way audio while navigating to My PC, camera video in both directions, screen sharing and browser stop-share, reconnect, leave, and sign-out. No Zoom credentials are included in the repository.
+
+The older `server.js` and `public/app.js` are legacy implementations; the supported app runs through `server.mjs` or Vercel.
+
+## Checks
+
+- `npm test` checks Zoom JWT signatures, session/user binding, expiry, and missing credentials.
+- `npx playwright install chromium` then `npm run test:ui` checks responsive navigation, call persistence, mute/leave, and preservation of the VM iframe with **mocked account data and Zoom SDK**. Set `CHROMIUM_EXECUTABLE_PATH` to use an installed Chromium instead. These checks do not verify real Zoom media transport.
+- `npm run build` checks TypeScript and the production bundle. Supply `VITE_SUPABASE_PUBLISHABLE_KEY` to include the authenticated app in the build. The Zoom SDK is loaded only when joining a call.
