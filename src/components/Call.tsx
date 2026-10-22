@@ -1,56 +1,440 @@
-import {useEffect,useRef,useState} from 'react';
-import {Room,RoomEvent,Track} from 'livekit-client';
-import {Mic,MicOff,Video,VideoOff,MonitorUp,MonitorOff,PhoneOff,Phone,Users,ShieldCheck} from 'lucide-react';
-import {request} from '../lib/supabase';
-type Props={space:string;restricted:boolean;userId:string};
-export default function Call({space,restricted}:Props){
- const roomRef=useRef<Room|null>(null),stage=useRef<HTMLDivElement>(null);
- const [joined,setJoined]=useState(false),[connecting,setConnecting]=useState(false),[mic,setMic]=useState(false),[cam,setCam]=useState(false),[sharing,setSharing]=useState(false),[people,setPeople]=useState(0),[error,setError]=useState('');
- function clear(){stage.current?.replaceChildren();setJoined(false);setMic(false);setCam(false);setSharing(false);setPeople(0)}
- function sync(room:Room){setPeople(room.remoteParticipants.size+1);setSharing(room.localParticipant.isScreenShareEnabled)}
- async function join(){
-  if(connecting||joined)return;
-  setConnecting(true);setError('');
-  try{
-   const {url,token}=await request<{url:string,token:string}>('/call/'+space,{});
-   const room=new Room({adaptiveStream:true,dynacast:true});
-   roomRef.current=room;
-   room.on(RoomEvent.TrackSubscribed,(track,_publication,participant)=>{
-    const element=track.attach();
-    element.dataset.participant=participant.identity;
-    if(track.kind===Track.Kind.Video){element.className='call-media';}
-    else {element.style.display='none';}
-    stage.current?.append(element);
-   });
-   room.on(RoomEvent.TrackUnsubscribed,track=>track.detach().forEach(element=>element.remove()));
-   room.on(RoomEvent.ParticipantConnected,()=>sync(room));
-   room.on(RoomEvent.ParticipantDisconnected,()=>sync(room));
-   room.on(RoomEvent.LocalTrackUnpublished,()=>sync(room));
-   room.on(RoomEvent.Disconnected,clear);
-   await room.connect(url,token);
-   setJoined(true);sync(room);
-  }catch(e){setError(String(e));await roomRef.current?.disconnect();roomRef.current=null;}finally{setConnecting(false)}
- }
- async function leave(){await roomRef.current?.disconnect();roomRef.current=null;clear()}
- async function toggleMic(){const room=roomRef.current;if(!room)return;try{const next=!mic;await room.localParticipant.setMicrophoneEnabled(next);setMic(next)}catch(e){setError(String(e))}}
- async function toggleCam(){const room=roomRef.current;if(!room||restricted)return;try{const next=!cam;await room.localParticipant.setCameraEnabled(next);setCam(next)}catch(e){setError(String(e))}}
- async function toggleShare(){const room=roomRef.current;if(!room)return;try{const next=!sharing;await room.localParticipant.setScreenShareEnabled(next);sync(room)}catch(e){setError(String(e))}}
- useEffect(()=>()=>{void roomRef.current?.disconnect()},[space]);
- return <section className="call-room">
-  <div className="call-room-heading"><div><span className="call-kicker">{joined?'● CONNECTED':'VOICE · VIDEO · SCREEN SHARE'}</span><h2>{joined?'You’re in the call':'Get together, instantly.'}</h2><p>{joined?'Talk, turn on your camera, or present your screen.':'Your Space is ready for a conversation.'}</p></div><span className="call-people"><Users size={16}/>{joined?people+' in call':'Private Space'}</span></div>
-  <div className={'call-stage '+(joined?'in-call':'')}>
-   <div className="call-stage-placeholder"><div className="call-stage-icon"><Phone size={30}/></div><h3>{joined?'Connected to your Space':'Your next conversation starts here'}</h3><p>{joined?'Other people’s video and shared screens appear here.':'Join with audio, video, or share a screen with everyone in your Space.'}</p></div>
-   <div ref={stage} className="video-stage"/>
-  </div>
-  <div className="call-toolbar">
-   {!joined?<button className="call-join" disabled={connecting} onClick={()=>void join()}><Phone size={19}/>{connecting?'Connecting…':'Join call'}</button>:<>
-    <button className={'call-control '+(mic?'is-on':'')} onClick={()=>void toggleMic()}>{mic?<Mic size={20}/>:<MicOff size={20}/>}<span>{mic?'Mute':'Unmute'}</span></button>
-    <button className={'call-control '+(cam?'is-on':'')} disabled={restricted} title={restricted?'Restricted Video is enabled; camera access is disabled until whitelist enforcement is complete.':undefined} onClick={()=>void toggleCam()}>{cam?<Video size={20}/>:<VideoOff size={20}/>}<span>{cam?'Stop video':'Start video'}</span></button>
-    <button className={'call-control '+(sharing?'is-on':'')} onClick={()=>void toggleShare()}>{sharing?<MonitorOff size={20}/>:<MonitorUp size={20}/>}<span>{sharing?'Stop sharing':'Share screen'}</span></button>
-    <button className="call-control call-hangup" onClick={()=>void leave()}><PhoneOff size={20}/><span>Leave</span></button>
-   </>}
-  </div>
-  {restricted&&<div className="call-privacy"><ShieldCheck size={16}/> Restricted Video is on. Camera publishing remains disabled until whitelist-only delivery is implemented. Screen sharing is visible to call participants.</div>}
-  {error&&<p role="alert" className="error">{error}</p>}
- </section>
+import { createElement, useEffect, useRef, useState } from "react";
+import type ZoomVideo from "@zoom/videosdk";
+import {
+  Mic,
+  MicOff,
+  Video,
+  VideoOff,
+  MonitorUp,
+  PhoneOff,
+  Phone,
+  Headphones,
+  Users,
+} from "lucide-react";
+import { request } from "../lib/supabase";
+type Client = ReturnType<typeof ZoomVideo.createClient>;
+type Person = ReturnType<Client["getAllUser"]>[number];
+type Props = {
+  space: string;
+  name: string;
+  restricted: boolean;
+  userId: string;
+  compact?: boolean;
+  onJoined: (joined: boolean) => void;
+};
+const describe = (e: unknown) =>
+  e instanceof Error
+    ? e.message
+    : typeof e === "object" && e && "reason" in e
+      ? String(e.reason)
+      : String(e);
+// Zoom may resolve an operation with ExecutedFailure instead of rejecting it.
+async function checked<T>(result: Promise<T>): Promise<T> {
+  const value = await result;
+  if (value && typeof value === "object" && "type" in value) throw value;
+  return value;
+}
+export default function Call({
+  space,
+  name,
+  restricted,
+  compact,
+  onJoined,
+}: Props) {
+  const clientRef = useRef<Client | null>(null),
+    stage = useRef<HTMLDivElement>(null),
+    shareHost = useRef<HTMLDivElement>(null),
+    shareViewHost = useRef<HTMLDivElement>(null),
+    remoteSharer = useRef(0),
+    shareQueue = useRef(Promise.resolve());
+  const alive = useRef(true),
+    busyRef = useRef(false),
+    generation = useRef(0),
+    listeners = useRef<(() => void)[]>([]);
+  const attached = useRef(new Map<number, HTMLElement>()),
+    renderQueue = useRef(Promise.resolve());
+  const [joined, setJoined] = useState(false),
+    [busy, setBusy] = useState(false),
+    [mic, setMic] = useState(false),
+    [audio, setAudio] = useState(false),
+    [cam, setCam] = useState(false),
+    [sharing, setSharing] = useState(false),
+    [people, setPeople] = useState<Person[]>([]),
+    [error, setError] = useState(""),
+    [status, setStatus] = useState("Ready when you are"),
+    [resume, setResume] = useState(false);
+  const notify = useRef(onJoined);
+  notify.current = onJoined;
+  function reset() {
+    attached.current.clear();
+    stage.current?.replaceChildren();
+    shareHost.current?.replaceChildren();
+    shareViewHost.current?.replaceChildren();
+    remoteSharer.current = 0;
+    if (!alive.current) return;
+    setJoined(false);
+    notify.current(false);
+    setMic(false);
+    setAudio(false);
+    setCam(false);
+    setSharing(false);
+    setPeople([]);
+    setResume(false);
+    setStatus("Ready when you are");
+  }
+  function sync(client: Client) {
+    if (client !== clientRef.current || !alive.current) return;
+    setPeople([...client.getAllUser()]);
+    const stream = client.getMediaStream();
+    setCam(stream.isCapturingVideo());
+    setMic(!stream.isAudioMuted());
+    renderQueue.current = renderQueue.current
+      .then(async () => {
+        if (client !== clientRef.current) return;
+        const users = client.getAllUser();
+        for (const [id, element] of attached.current) {
+          if (!users.some((u) => u.userId === id && u.bVideoOn)) {
+            await stream.detachVideo(id).catch(() => {});
+            element.remove();
+            attached.current.delete(id);
+          }
+        }
+        for (const user of users) {
+          if (user.bVideoOn && !attached.current.has(user.userId)) {
+            const element = await stream.attachVideo(user.userId, 2);
+            if (!(element instanceof HTMLElement)) throw element;
+            if (client !== clientRef.current) {
+              element.remove();
+              return;
+            }
+            attached.current.set(user.userId, element);
+            stage.current?.append(element);
+          }
+        }
+      })
+      .catch((e) => {
+        if (alive.current) setError(describe(e));
+      });
+  }
+  async function run(fn: () => Promise<void>) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      await fn();
+    } catch (e) {
+      if (alive.current) setError(describe(e));
+    } finally {
+      busyRef.current = false;
+      if (alive.current) setBusy(false);
+    }
+  }
+  async function dispose() {
+    generation.current++;
+    listeners.current.splice(0).forEach((off) => off());
+    const client = clientRef.current;
+    clientRef.current = null;
+    reset();
+    await client?.leave().catch(() => {});
+  }
+  async function join() {
+    await run(async () => {
+      const ticket = ++generation.current;
+      const data = await request<{
+        token: string;
+        sessionName: string;
+        displayName: string;
+      }>("/call/" + space, {});
+      if (ticket !== generation.current || !alive.current) return;
+      const { default: ZoomVideo } = await import("@zoom/videosdk");
+      if (ticket !== generation.current || !alive.current) return;
+      const client = ZoomVideo.createClient();
+      clientRef.current = client;
+      try {
+        await checked(
+          client.init("en-US", "Global", {
+            patchJsMedia: true,
+            enforceMultipleVideos: true,
+            leaveOnPageUnload: true,
+          }),
+        );
+        if (ticket !== generation.current) return;
+        const listen = (event: string, fn: (payload: any) => void) => {
+          client.on(event as any, fn);
+          listeners.current.push(() => client.off(event as any, fn));
+        };
+        listen("user-added", () => sync(client));
+        listen("user-removed", () => sync(client));
+        listen("user-updated", () => sync(client));
+        listen("peer-video-state-change", () => sync(client));
+        listen("auto-play-audio-failed", () => setResume(true));
+        listen("connection-change", (event) => {
+          if (event.state === "Closed") {
+            void dispose();
+            if (alive.current)
+              setError(event.reason || "Call ended. You can rejoin.");
+          } else
+            setStatus(
+              event.state === "Reconnecting" ? "Reconnecting…" : "Connected",
+            );
+        });
+        listen("passively-stop-share", () => {
+          setSharing(false);
+          shareHost.current?.replaceChildren();
+        });
+        listen("active-share-change", (event) => {
+          void runShareView(event.state === "Active" ? event.userId : 0);
+        });
+        await checked(
+          client.join(data.sessionName, data.token, data.displayName),
+        );
+        if (ticket !== generation.current || !alive.current) {
+          await client.leave();
+          return;
+        }
+        setJoined(true);
+        notify.current(true);
+        setStatus("Connected");
+        sync(client);
+        const active = client.getMediaStream().getActiveShareUserId();
+        if (active) await runShareView(active);
+        // Audio is deliberately enabled by a separate click, retaining a real user gesture.
+      } catch (e) {
+        await dispose();
+        throw e;
+      }
+    });
+  }
+  async function runShareView(userId: number) {
+    const client = clientRef.current;
+    if (!client) return;
+    shareQueue.current = shareQueue.current
+      .then(async () => {
+        if (client !== clientRef.current || !shareViewHost.current) return;
+        const stream = client.getMediaStream();
+        if (remoteSharer.current) {
+          await stream.detachShareView(remoteSharer.current);
+          remoteSharer.current = 0;
+        }
+        shareViewHost.current.replaceChildren();
+        if (userId && userId !== client.getCurrentUserInfo().userId) {
+          const element = await stream.attachShareView(userId);
+          if (!(element instanceof HTMLElement)) throw element;
+          if (client !== clientRef.current) {
+            element.remove();
+            return;
+          }
+          shareViewHost.current.append(element);
+          remoteSharer.current = userId;
+        }
+      })
+      .catch((e) => {
+        if (alive.current) setError(describe(e));
+      });
+    await shareQueue.current;
+  }
+  async function toggleAudio() {
+    await run(async () => {
+      const stream = clientRef.current?.getMediaStream();
+      if (!stream) return;
+      if (!audio) {
+        await checked(stream.startAudio());
+        setAudio(true);
+        setMic(true);
+        setResume(false);
+      } else if (mic) {
+        await checked(stream.muteAudio());
+        setMic(false);
+      } else {
+        await checked(stream.unmuteAudio());
+        setMic(true);
+      }
+    });
+  }
+  async function toggleCamera() {
+    await run(async () => {
+      const client = clientRef.current;
+      if (!client || restricted) return;
+      const stream = client.getMediaStream();
+      await checked(cam ? stream.stopVideo() : stream.startVideo());
+      sync(client);
+    });
+  }
+  async function toggleShare() {
+    await run(async () => {
+      const stream = clientRef.current?.getMediaStream();
+      if (!stream || !shareHost.current) return;
+      if (sharing) {
+        await checked(stream.stopShareScreen());
+        setSharing(false);
+        shareHost.current.replaceChildren();
+      } else {
+        const element = document.createElement(
+          stream.isStartShareScreenWithVideoElement() ? "video" : "canvas",
+        );
+        if (element instanceof HTMLVideoElement) {
+          element.muted = true;
+          element.autoplay = true;
+          element.playsInline = true;
+        }
+        shareHost.current.replaceChildren(element);
+        try {
+          await checked(stream.startShareScreen(element));
+          setSharing(true);
+        } catch (e) {
+          element.remove();
+          throw e;
+        }
+      }
+    });
+  }
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      void dispose();
+    };
+  }, []);
+  useEffect(() => {
+    if (restricted && clientRef.current?.getMediaStream().isCapturingVideo()) {
+      void checked(clientRef.current.getMediaStream().stopVideo())
+        .then(() => {
+          if (clientRef.current) sync(clientRef.current);
+        })
+        .catch((e) => setError(describe(e)));
+    }
+  }, [restricted]);
+  return (
+    <section
+      className={"call-room " + (compact ? "compact" : "")}
+      aria-label="Zoom call"
+    >
+      <div className="call-room-heading">
+        <div>
+          <span className="call-kicker">ZOOM VIDEO SDK</span>
+          <h2>{name}</h2>
+        </div>
+        <span className={"connection " + (joined ? "live" : "")}>
+          <i />
+          {status}
+        </span>
+      </div>
+      <div className="call-stage">
+        <div className="call-stage-placeholder">
+          <div className="call-stage-icon">
+            <Headphones size={36} />
+          </div>
+          <h3>
+            {joined
+              ? "You’re in. Make yourself at home."
+              : "Your friends are a call away."}
+          </h3>
+          <p>
+            {joined
+              ? "Your call stays connected while you use your desktop or messages."
+              : "Catch up, share your screen, or just hang out while you do your thing."}
+          </p>
+        </div>
+        {createElement("video-player-container", {
+          ref: stage,
+          className: "video-stage",
+        })}
+        <div ref={shareHost} className="share-stage" />
+        {createElement("video-player-container", {
+          ref: shareViewHost,
+          className: "share-view-stage",
+        })}
+      </div>
+      {joined && (
+        <div className="people-strip">
+          <Users size={14} />
+          {people.length} in this call
+          {people.map((p) => (
+            <span key={p.userId}>
+              {p.displayName}
+              {p.muted ? " · muted" : ""}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="call-toolbar">
+        {!joined ? (
+          <button
+            className="call-join"
+            disabled={busy}
+            onClick={() => void join()}
+          >
+            <Phone size={18} />
+            {busy ? "Connecting…" : "Join the call"}
+          </button>
+        ) : (
+          <>
+            <button
+              className={"call-control " + (mic && audio ? "is-on" : "")}
+              disabled={busy}
+              onClick={() => void toggleAudio()}
+            >
+              {mic && audio ? <Mic size={20} /> : <MicOff size={20} />}
+              <span>{!audio ? "Enable audio" : mic ? "Mute" : "Unmute"}</span>
+            </button>
+            <button
+              className={"call-control " + (cam ? "is-on" : "")}
+              disabled={busy || restricted}
+              onClick={() => void toggleCamera()}
+            >
+              {cam ? <Video size={20} /> : <VideoOff size={20} />}
+              <span>{cam ? "Camera off" : "Camera on"}</span>
+            </button>
+            <button
+              className={"call-control " + (sharing ? "is-on" : "")}
+              disabled={busy}
+              onClick={() => void toggleShare()}
+            >
+              <MonitorUp size={20} />
+              <span>{sharing ? "Stop share" : "Share screen"}</span>
+            </button>
+            <button
+              className="call-control call-hangup"
+              disabled={busy}
+              onClick={() => void run(dispose)}
+            >
+              <PhoneOff size={20} />
+              <span>Leave</span>
+            </button>
+          </>
+        )}
+      </div>
+      {resume && (
+        <button
+          className="audio-resume"
+          disabled={busy}
+          onClick={() =>
+            void run(async () => {
+              const stream = clientRef.current?.getMediaStream();
+              if (stream) {
+                await checked(stream.startAudio());
+                setAudio(true);
+                setMic(!stream.isAudioMuted());
+                setResume(false);
+              }
+            })
+          }
+        >
+          Click to resume call audio
+        </button>
+      )}
+      {restricted && (
+        <p className="call-privacy">
+          Restricted Video is on. Your camera stays off. Screen shares are
+          visible to everyone in this call.
+        </p>
+      )}
+      {error && (
+        <p role="alert" className="error">
+          {error}
+        </p>
+      )}
+    </section>
+  );
 }
