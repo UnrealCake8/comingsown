@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "start": "node --env-file=.env server.mjs",
     "test": "node --test tests/*.test.mjs",
-    "test:ui": "node tests/call-navigation.cjs"
+    "test:ui": "node tests/call-navigation.cjs",
+    "test:db": "node tests/vm-pool.integration.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.0",
@@ -19,6 +20,7 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.11",
     "@types/node": "^22.13.0",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",

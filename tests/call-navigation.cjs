@@ -39,10 +39,10 @@ const assert = require("node:assert/strict");
   await page.route("**/src/lib/supabase.ts", (route) =>
     route.fulfill({
       contentType: "text/javascript",
-      body: `export const supabase={auth:{signOut:async()=>{}}};export async function request(path,body){if(path==='/bootstrap')return {profile:{username:'hammad',restricted_video:false},spaces:[{id:'one',name:'The hangout',owner_id:'me'},{id:'two',name:'After school',owner_id:'me'}],vm:1};if(path.startsWith('/messages/'))return {messages:[]};if(path.startsWith('/call/'))return {token:'mock',sessionName:'mao-'+path.split('/').pop(),displayName:'hammad'};if(path==='/friends')return {links:[],people:[]};return {ok:true}}`,
+      body: `export const supabase={auth:{signOut:async()=>{}}};export async function request(path,body){if(path==='/bootstrap')return {profile:{username:'hammad',restricted_video:false},spaces:[{id:'one',name:'The hangout',owner_id:'me'},{id:'two',name:'After school',owner_id:'me'}],vm:('vmFixture' in window?window.vmFixture:1)};if(path==='/vm/claim')return {vm:window.vmClaim??null};if(path.startsWith('/messages/'))return {messages:[]};if(path.startsWith('/call/'))return {token:'mock',sessionName:'mao-'+path.split('/').pop(),displayName:'hammad'};if(path==='/friends')return {links:[],people:[]};return {ok:true}}`,
     }),
   );
-  await page.route("**/vm1.asanib.com/**", (route) =>
+  await page.route(/https:\/\/vm\d+\.asanib\.com\//, (route) =>
     route.fulfill({
       contentType: "text/html",
       body: '<body style="background:#d1e3f4;font-family:sans-serif;padding:30px">Mock desktop</body>',
@@ -88,6 +88,37 @@ const assert = require("node:assert/strict");
     ),
     "mobile horizontal overflow",
   );
+  // A full pool must not block calling; claiming newly added capacity keeps the call alive.
+  await page.addInitScript(() => {
+    window.vmFixture = null;
+    window.vmClaim = null;
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "Join the call" }).click();
+  await page.getByRole("button", { name: "Enable audio" }).click();
+  await page.getByRole("button", { name: "My PC", exact: true }).click();
+  await page
+    .getByRole("heading", { name: "All PCs are taken right now" })
+    .waitFor();
+  await page.getByRole("button", { name: "Check for a PC" }).click();
+  await page
+    .getByRole("status")
+    .filter({ hasText: "All PCs are still taken" })
+    .waitFor();
+  await page.evaluate(() => {
+    window.vmClaim = 18;
+  });
+  await page.getByRole("button", { name: "Check for a PC" }).click();
+  await page.getByTitle("Your Linux desktop").waitFor({ state: "visible" });
+  assert.equal(
+    await page.getByTitle("Your Linux desktop").getAttribute("src"),
+    "https://vm18.asanib.com",
+  );
+  assert.deepEqual(await page.evaluate(() => window.callStats), {
+    join: 1,
+    leave: 0,
+    audio: 1,
+  });
   assert.deepEqual(errors, []);
   console.log(
     "PASS: navigation preserves Zoom session/audio and VM iframe; room selection preserves active call; mute/leave controls; desktop/mobile layout; no page errors. Mock SDK and account data used.",

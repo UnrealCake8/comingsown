@@ -31,7 +31,7 @@ A user's `restricted_video` flag and whitelist are stored in Supabase. **For now
 
 ## Other limitations
 - Message refresh currently uses polling; Supabase Realtime subscriptions still need wiring.
-- VM assignment is intentionally administrator-managed; new accounts receive no VM automatically.
+- Automatic VM assignment uses `mao.vm_pool`; apply `supabase/setup-vm-pool.sql` before deploying the matching API. Existing assignments are preserved. See `supabase/README.md`.
 - VM iframe access relies on the security of the existing Mac VM endpoints.
 - The old Node.js server remains for reference but is not deployed by Vercel.
 - No production domain switch until staging and call/privacy tests pass.
