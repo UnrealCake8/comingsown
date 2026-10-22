@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "start": "node --env-file=.env server.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.0",
