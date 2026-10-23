@@ -702,6 +702,7 @@ export default function App({ userId }: { userId: string }) {
                 name={callSpace.name}
                 restricted={profile.restricted_video}
                 userId={userId}
+                vm={vm}
                 compact={tab !== "call"}
                 onJoined={(joined) => setLiveSpace(joined ? callSpace.id : "")}
               />

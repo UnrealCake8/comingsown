@@ -84,7 +84,7 @@ export async function request(path,body){
   await page.route("**/*zoom*videosdk*.js*", (route) =>
     route.fulfill({
       contentType: "text/javascript",
-      body: `window.callStats={join:0,leave:0,audio:0};const listeners={};let muted=true,video=false;const stream={isAudioMuted:()=>muted,isCapturingVideo:()=>video,getActiveShareUserId:()=>0,startAudio:async()=>{window.callStats.audio++;muted=false},muteAudio:async()=>{muted=true},unmuteAudio:async()=>{muted=false},startVideo:async()=>{video=true},stopVideo:async()=>{video=false},attachVideo:async()=>document.createElement('video-player'),detachVideo:async()=>[],stopShareScreen:async()=>{},isStartShareScreenWithVideoElement:()=>true,startShareScreen:async()=>{}};const client={init:async()=>{},join:async()=>{window.callStats.join++},leave:async()=>{window.callStats.leave++},on:(e,f)=>{listeners[e]=f},off:e=>{delete listeners[e]},getAllUser:()=>[{userId:1,displayName:'hammad',bVideoOn:video,muted}],getCurrentUserInfo:()=>({userId:1}),getMediaStream:()=>stream};export default {createClient:()=>client};`,
+      body: `window.callStats={join:0,leave:0,audio:0};const listeners=window.sdkListeners={};window.vmCommands=[];let muted=true,video=false;const stream={getMicList:()=>[{deviceId:"mic",label:"Test mic"}],getSpeakerList:()=>[{deviceId:"speaker",label:"Test speaker"}],switchMicrophone:async()=>{},switchSpeaker:async()=>{},isAudioMuted:()=>muted,isCapturingVideo:()=>video,getActiveShareUserId:()=>0,startAudio:async()=>{window.callStats.audio++;muted=false},muteAudio:async()=>{muted=true},unmuteAudio:async()=>{muted=false},startVideo:async()=>{video=true},stopVideo:async()=>{video=false},attachVideo:async()=>document.createElement('video-player'),detachVideo:async()=>[],stopShareScreen:async()=>{},isStartShareScreenWithVideoElement:()=>true,startShareScreen:async()=>{}};const client={init:async()=>{},join:async()=>{window.callStats.join++},leave:async()=>{window.callStats.leave++},on:(e,f)=>{listeners[e]=f},off:e=>{delete listeners[e]},getAllUser:()=>[{userId:1,displayName:'hammad',bVideoOn:video,muted},{userId:2,displayName:'alice',muted:true}],getCurrentUserInfo:()=>({userId:1}),getMediaStream:()=>stream,getCommandClient:()=>({send:async text=>{window.vmCommands.push(JSON.parse(text))}})};export default {createClient:()=>client};`,
     }),
   );
   await page.goto("http://127.0.0.1:5173");
@@ -112,6 +112,25 @@ export async function request(path,body){
     audio: 1,
   });
   const iframe = await page.getByTitle("Your Linux desktop").elementHandle();
+  await page.getByRole("button", {name:"Share VM screen", exact:true}).click();
+  assert.deepEqual(await page.evaluate(() => window.vmCommands.at(-1)), {type:"mao-vm-share",vm:1});
+  await page.getByRole("button", {name:"Stop VM share", exact:true}).click();
+  assert.equal(await page.evaluate(() => window.vmCommands.at(-1).vm), null);
+  await page.evaluate(() => window.sdkListeners["command-channel-message"]({senderId:2,text:JSON.stringify({type:"mao-vm-share",vm:2})}));
+  await page.getByRole("button", {name:"Watch alice’s VM", exact:true}).click();
+  assert.equal(await page.getByTitle("Shared VM screen").getAttribute("src"), "https://vm2.asanib.com/#shared");
+  assert(await iframe.evaluate(el => el.isConnected), "watching a friend must preserve own controller");
+  await screenshot("vm-sharing-call");
+  await page.evaluate(() => window.sdkListeners["command-channel-message"]({senderId:2,text:JSON.stringify({type:"mao-vm-share",vm:null})}));
+  await page.getByTitle("Shared VM screen").waitFor({state:"detached"});
+  await page.evaluate(() => window.sdkListeners["command-channel-message"]({senderId:999,text:JSON.stringify({type:"mao-vm-share",vm:2})}));
+  assert.equal(await page.getByRole("button", {name:"Watch Friend’s VM"}).count(), 0);
+  await page.getByRole("button", {name:"Audio settings",exact:true}).click();
+  await page.getByLabel("Microphone",{exact:true}).selectOption("mic");
+  await page.getByLabel("Speaker",{exact:true}).selectOption("speaker");
+  await page.getByRole("button", {name:"Audio settings",exact:true}).click();
+  await page.getByRole("button", {name:"Hide video",exact:true}).click();
+
   await page.getByRole("button", { name: "Chat", exact: true }).click();
   await page.getByRole("button", { name: "My PC", exact: true }).click();
   assert(await iframe.evaluate((el) => el.isConnected), "VM iframe preserved");
