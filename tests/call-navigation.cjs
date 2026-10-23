@@ -28,7 +28,25 @@ const assert = require("node:assert/strict");
     viewport: { width: 1440, height: 1000 },
   });
   globalThis.testBrowser = browser;
+  async function screenshot(name) {
+    if (process.env.MAO_SCREENSHOT_DIR) {
+      await require("node:fs/promises").mkdir(process.env.MAO_SCREENSHOT_DIR, {
+        recursive: true,
+      });
+      await page.screenshot({
+        path: require("node:path").join(
+          process.env.MAO_SCREENSHOT_DIR,
+          name + ".png",
+        ),
+        fullPage: true,
+      });
+    }
+  }
   const errors = [];
+  page.on("dialog", async (dialog) => {
+    errors.push("Unexpected native dialog");
+    await dialog.dismiss();
+  });
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/src/entry.tsx", (route) =>
     route.fulfill({
@@ -39,10 +57,25 @@ const assert = require("node:assert/strict");
   await page.route("**/src/lib/supabase.ts", (route) =>
     route.fulfill({
       contentType: "text/javascript",
-      body: `export const supabase={auth:{signOut:async()=>{}}};export async function request(path,body){if(path==='/bootstrap')return {profile:{username:'hammad',restricted_video:false},spaces:[{id:'one',name:'The hangout',owner_id:'me'},{id:'two',name:'After school',owner_id:'me'}],vm:('vmFixture' in window?window.vmFixture:1)};if(path==='/vm/claim')return {vm:window.vmClaim??null};if(path.startsWith('/messages/'))return {messages:[]};if(path.startsWith('/call/'))return {token:'mock',sessionName:'mao-'+path.split('/').pop(),displayName:'hammad'};if(path==='/friends')return {links:[],people:[]};return {ok:true}}`,
+      body: `
+const initial=[{id:'one',name:'The hangout',owner_id:'me'},{id:'two',name:'After school',owner_id:'me'}];
+let spaces=window.emptySpaces?[]:initial;
+let links=[{requester_id:'me',addressee_id:'alice',status:'accepted'}];
+export const supabase={auth:{signOut:async()=>{}}};
+export async function request(path,body){
+ if(path==='/bootstrap')return {profile:{username:'hammad',restricted_video:false},spaces,vm:('vmFixture' in window?window.vmFixture:1)};
+ if(path==='/vm/claim')return {vm:window.vmClaim??null};
+ if(path==='/spaces'){if(body.name==='fail')throw Error('Please choose another name');const space={id:'new-space',name:body.name,owner_id:'me'};spaces=[...spaces,space];return {space}};
+ if(path.startsWith('/invite/')){if(body.username!=='alice')throw Error('Friends only');return {ok:true}};
+ if(path==='/friends'&&body){if(body.username==='ghost')throw Error('User not found');links=[...links,{requester_id:'me',addressee_id:body.username,status:'pending'}];return {ok:true}};
+ if(path.startsWith('/messages/'))return {messages:[]};
+ if(path.startsWith('/call/'))return {token:'mock',sessionName:'mao-'+path.split('/').pop(),displayName:'hammad'};
+ if(path==='/friends')return {links,people:[{user_id:'alice',username:'alice'},{user_id:'bob',username:'bob'}]};
+ return {ok:true}
+}`,
     }),
   );
-  await page.route(/https:\/\/vm\d+\.asanib\.com\//, (route) =>
+  await page.context().route("https://vm*.asanib.com/**", (route) =>
     route.fulfill({
       contentType: "text/html",
       body: '<body style="background:#d1e3f4;font-family:sans-serif;padding:30px">Mock desktop</body>',
@@ -56,6 +89,19 @@ const assert = require("node:assert/strict");
   );
   await page.goto("http://127.0.0.1:5173");
   await page.getByRole("button", { name: "Join the call" }).waitFor();
+  await screenshot("pc-desktop");
+  const desktopBounds = await page.locator(".desktop-frame").boundingBox();
+  assert(
+    desktopBounds.y < 250 && desktopBounds.height > 500,
+    "PC must be prominent and usable above the fold",
+  );
+  await page.getByRole("button", { name: "Focus PC", exact: true }).click();
+  assert(
+    (await page.locator(".desktop-frame").boundingBox()).height >
+      desktopBounds.height,
+    "focus increases PC area",
+  );
+  await page.getByRole("button", { name: "Exit focus", exact: true }).click();
   await page.getByRole("button", { name: "Join the call" }).click();
   await page.getByRole("button", { name: "Enable audio" }).click();
   await page.getByRole("button", { name: "My PC", exact: true }).click();
@@ -77,6 +123,72 @@ const assert = require("node:assert/strict");
   });
   await page.getByRole("button", { name: "Mute", exact: true }).click();
   await page.getByRole("button", { name: "Unmute", exact: true }).waitFor();
+  // The dock expands media without unmounting the call.
+  await page.getByRole("button", { name: "Show video", exact: true }).click();
+  await page.getByRole("button", { name: "Hide video", exact: true }).click();
+  const popupPromise = page.context().waitForEvent("page");
+  await page
+    .getByRole("button", { name: "Open in a new tab", exact: true })
+    .click();
+  const pcPopup = await popupPromise;
+  await page
+    .getByRole("heading", { name: "Your PC is open in another tab" })
+    .waitFor();
+  assert.equal(
+    await page.getByTitle("Your Linux desktop").count(),
+    0,
+    "embedded PC must be suspended during pop-out",
+  );
+  await pcPopup.waitForURL("https://vm1.asanib.com/");
+  assert((await pcPopup.locator("body").innerText()).includes("Mock desktop"));
+  await pcPopup.reload();
+  await page
+    .getByRole("button", { name: "Resume here", exact: true })
+    .last()
+    .click();
+  await pcPopup.close();
+  await page.getByTitle("Your Linux desktop").waitFor({ state: "visible" });
+  const resumedFrame = await page
+    .getByTitle("Your Linux desktop")
+    .elementHandle();
+  await page.evaluate(() => {
+    window.realOpen = window.open;
+    window.open = () => null;
+  });
+  await page
+    .getByRole("button", { name: "Open in a new tab", exact: true })
+    .click();
+  await page
+    .getByRole("alert")
+    .filter({ hasText: "Your browser blocked the new tab" })
+    .waitFor();
+  assert(
+    await resumedFrame.evaluate((el) => el.isConnected),
+    "blocked pop-out must preserve desktop",
+  );
+  await page.evaluate(() => {
+    window.open = window.realOpen;
+  });
+  await page.getByRole("button", { name: "Reconnect", exact: true }).click();
+  await page.getByTitle("Your Linux desktop").waitFor({ state: "visible" });
+  assert.deepEqual(
+    await page.evaluate(() => window.callStats),
+    { join: 1, leave: 0, audio: 1 },
+    "PC controls must preserve the call",
+  );
+  await page
+    .getByRole("button", { name: "Customise Space", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Icon Gaming", exact: true }).click();
+  await page.getByRole("button", { name: "mint", exact: true }).click();
+  await screenshot("space-dialog");
+  await page.getByRole("button", { name: "Save look", exact: true }).click();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "After school", exact: true })
+      .getAttribute("data-tone"),
+    "mint",
+  );
   await page.getByRole("button", { name: "Hang out", exact: true }).click();
   await page.getByRole("button", { name: "Leave", exact: true }).click();
   await page.getByRole("button", { name: "Join the call" }).waitFor();
@@ -88,8 +200,90 @@ const assert = require("node:assert/strict");
     ),
     "mobile horizontal overflow",
   );
+  await page.getByRole("button", { name: "My PC", exact: true }).click();
+  await screenshot("pc-mobile");
+  assert(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+    "mobile PC overflow",
+  );
+  // Styling is account-scoped and survives reload; onboarding never offers a disabled chat composer.
+  await page.reload();
+  await page
+    .getByRole("button", { name: "After school", exact: true })
+    .waitFor();
+  assert.equal(
+    await page
+      .getByRole("button", { name: "After school", exact: true })
+      .getAttribute("data-tone"),
+    "mint",
+  );
+  await page.addInitScript(() => {
+    window.emptySpaces = true;
+  });
+  await page.reload();
+  await page.getByRole("button", { name: "Chat", exact: true }).click();
+  await page.getByRole("heading", { name: "Give your chat a home" }).waitFor();
+  assert.equal(
+    await page.getByRole("textbox", { name: "Message", exact: true }).count(),
+    0,
+  );
+  await page.getByRole("button", { name: "New space", exact: true }).click();
+  await page
+    .getByRole("textbox", { name: "Space name", exact: true })
+    .fill("fail");
+  await page.getByRole("button", { name: "Create Space", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("alert")
+    .filter({ hasText: "Please choose another name" })
+    .waitFor();
+  await page
+    .getByRole("textbox", { name: "Space name", exact: true })
+    .fill("Weekend crew");
+  await page.getByRole("button", { name: "Icon Rocket", exact: true }).click();
+  await page.getByRole("button", { name: "sky", exact: true }).click();
+  await page.getByRole("button", { name: "Create Space", exact: true }).click();
+  await page.getByRole("dialog").waitFor({ state: "hidden" });
+  assert.equal(
+    await page
+      .getByRole("button", { name: "Weekend crew", exact: true })
+      .getAttribute("data-tone"),
+    "sky",
+  );
+  await page
+    .getByRole("button", { name: "Invite a friend", exact: true })
+    .click();
+  await page.getByRole("button", { name: "@alice", exact: true }).click();
+  await page.getByRole("button", { name: "Send invite", exact: true }).click();
+  await page
+    .getByRole("status")
+    .filter({ hasText: "Friend invited" })
+    .waitFor();
+  await page.getByRole("button", { name: "Friends", exact: true }).click();
+  await page.getByRole("button", { name: "Add a friend", exact: true }).click();
+  await page
+    .getByRole("textbox", { name: "Friend’s username", exact: true })
+    .fill("ghost");
+  await page
+    .getByRole("button", { name: "Send friend request", exact: true })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("alert")
+    .filter({ hasText: "User not found" })
+    .waitFor();
+  await page
+    .getByRole("textbox", { name: "Friend’s username", exact: true })
+    .fill("bob");
+  await page
+    .getByRole("button", { name: "Send friend request", exact: true })
+    .click();
+  await page.getByText("Request sent", { exact: true }).waitFor();
   // A full pool must not block calling; claiming newly added capacity keeps the call alive.
   await page.addInitScript(() => {
+    window.emptySpaces = false;
     window.vmFixture = null;
     window.vmClaim = null;
   });
@@ -121,7 +315,7 @@ const assert = require("node:assert/strict");
   });
   assert.deepEqual(errors, []);
   console.log(
-    "PASS: navigation preserves Zoom session/audio and VM iframe; room selection preserves active call; mute/leave controls; desktop/mobile layout; no page errors. Mock SDK and account data used.",
+    "PASS: PC-first layout, focus, pop-out suspension/resume/reload, popup blocking, reconnect, persistent call controls/audio, onboarding, styled create/invite/friend forms with errors, saved Space looks, capacity retry, and mobile layout. Mock SDK and account data used.",
   );
   await browser.close();
   server.kill();

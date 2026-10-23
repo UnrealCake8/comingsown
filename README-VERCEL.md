@@ -30,3 +30,13 @@ The older `server.js` and `public/app.js` are legacy implementations; the suppor
 - `npm run build` checks TypeScript and the production bundle. Supply `VITE_SUPABASE_PUBLISHABLE_KEY` to include the authenticated app in the build. The Zoom SDK is loaded only when joining a call.
 
 - `npm run test:db` runs the SQL/PLpgSQL setup in a disposable PostgreSQL/PGlite database to check allocation, repeated requests, full pools, disabled VMs, existing assignments, and permissions. It never connects to Supabase. PGlite uses one backend; production multi-session lock contention still needs staging verification.
+
+## PC-first interface
+
+My PC is the default view, with a compact header, a larger desktop, and a Focus PC toggle. Call controls stay in a small dock below the PC. Show video expands the media area without leaving or remounting the call; receiving a screen share also opens it.
+
+Open in a new tab suspends the embedded desktop so the two views do not compete for the VM's primary connection. Resume here reconnects the embedded view; the separate PC tab can then be closed manually. The separate tab has no opener and cannot control the Mao tab. Popup blocking leaves the embedded desktop intact and displays an explanation. Reconnect view reloads only the PC iframe, retaining the apps running on the VM and the Mao call. Cross-origin VM pages do not expose reliable connection health to Mao; iframe loading is not presented as a health check.
+
+Space creation, invitations, and friend requests use accessible in-app dialogs with validation and inline errors. Chat explains how to create a Space before showing its composer. Space icons/colours are personal display preferences stored in versioned local storage, scoped to the account and this browser. No new database migration is required.
+
+See `VM-CHROME.md` for the confirmed VM1 Chrome launch failure and the remaining host-side work. This release does not claim to repair that container configuration or verify two-way Zoom audio.
