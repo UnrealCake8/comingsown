@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Headphones,
   Monitor,
@@ -7,11 +7,24 @@ import {
   Plus,
   LogOut,
   Shield,
-  ArrowUpRight,
   Phone,
+  Palette,
+  UserPlus,
+  Check,
+  ArrowRight,
 } from "lucide-react";
 import { supabase, request } from "./lib/supabase";
 import Call from "./components/Call";
+import Desktop from "./components/Desktop";
+import Modal from "./components/Modal";
+import SpaceIcon from "./components/SpaceIcon";
+import SpaceLookPicker from "./components/SpaceLookPicker";
+import {
+  DEFAULT_LOOK,
+  readSpaceLooks,
+  saveSpaceLook,
+  type SpaceLook,
+} from "./lib/spaceLooks";
 type Space = { id: string; name: string; owner_id: string };
 type Profile = { username: string; restricted_video: boolean };
 type Message = {
@@ -20,44 +33,70 @@ type Message = {
   body: string;
   created_at: string;
 };
+type Friends = {
+  links: { requester_id: string; addressee_id: string; status: string }[];
+  people: { user_id: string; username: string }[];
+};
+type FormKind = "create" | "invite" | "friend" | "look";
+const problem = (error: unknown) =>
+  error instanceof Error ? error.message : String(error);
 export default function App({ userId }: { userId: string }) {
-  const [liveSpace, setLiveSpace] = useState(""),
-    [profile, setProfile] = useState<Profile | null>(null),
-    [spaces, setSpaces] = useState<Space[]>([]),
-    [vm, setVm] = useState<number | null>(null),
-    [selected, setSelected] = useState(""),
-    [tab, setTab] = useState<
-      "desktop" | "chat" | "call" | "privacy" | "friends"
-    >("call"),
-    [messages, setMessages] = useState<Message[]>([]),
-    [draft, setDraft] = useState(""),
-    [username, setUsername] = useState(""),
-    [error, setError] = useState(""),
-    [loading, setLoading] = useState(true),
-    [claiming, setClaiming] = useState(false),
-    [vmNotice, setVmNotice] = useState(""),
-    [friends, setFriends] = useState<{
-      links: { requester_id: string; addressee_id: string; status: string }[];
-      people: { user_id: string; username: string }[];
-    }>({ links: [], people: [] });
+  const [profile, setProfile] = useState<Profile | null | undefined>(undefined);
+  const [spaces, setSpaces] = useState<Space[]>([]);
+  const [vm, setVm] = useState<number | null>(null);
+  const [selected, setSelected] = useState("");
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const [liveSpace, setLiveSpace] = useState("");
+  const [tab, setTab] = useState<
+    "desktop" | "chat" | "call" | "privacy" | "friends"
+  >("desktop");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [draft, setDraft] = useState("");
+  const [username, setUsername] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [claiming, setClaiming] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [vmNotice, setVmNotice] = useState("");
+  const [focused, setFocused] = useState(false);
+  const [friends, setFriends] = useState<Friends>({ links: [], people: [] });
+  const [looks, setLooks] = useState(() => readSpaceLooks(userId));
+  const [form, setForm] = useState<FormKind | null>(null);
+  const [formValue, setFormValue] = useState("");
+  const [formLook, setFormLook] = useState<SpaceLook>(DEFAULT_LOOK);
+  const [formBusy, setFormBusy] = useState(false);
+  const [formError, setFormError] = useState("");
+  const [savingPrivacy, setSavingPrivacy] = useState(false);
+  const formSpace = useRef("");
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   async function refresh() {
+    setError("");
     try {
       const data = await request<{
         profile: Profile | null;
         spaces: Space[];
         vm: number | null;
       }>("/bootstrap");
+      if (!mounted.current) return;
       setProfile(data.profile);
       setSpaces(data.spaces);
       setVm(data.vm);
       setSelected((old) =>
         data.spaces.some((s) => s.id === old) ? old : data.spaces[0]?.id || "",
       );
-      setError("");
     } catch (e) {
-      setError(String(e));
+      if (mounted.current) setError(problem(e));
     } finally {
-      setLoading(false);
+      if (mounted.current) setLoading(false);
     }
   }
   useEffect(() => {
@@ -65,6 +104,7 @@ export default function App({ userId }: { userId: string }) {
   }, []);
   useEffect(() => {
     setMessages([]);
+    setDraft("");
     if (!selected) return;
     let active = true;
     async function load() {
@@ -74,7 +114,7 @@ export default function App({ userId }: { userId: string }) {
         );
         if (active) setMessages(d.messages);
       } catch (e) {
-        if (active) setError(String(e));
+        if (active) setError(problem(e));
       }
     }
     void load();
@@ -84,13 +124,11 @@ export default function App({ userId }: { userId: string }) {
       clearInterval(interval);
     };
   }, [selected]);
-  async function act(fn: () => Promise<unknown>) {
+  async function loadFriends() {
     try {
-      setError("");
-      await fn();
-      await refresh();
+      setFriends(await request<Friends>("/friends"));
     } catch (e) {
-      setError(String(e));
+      setError(problem(e));
     }
   }
   async function retryVm() {
@@ -98,84 +136,209 @@ export default function App({ userId }: { userId: string }) {
     setClaiming(true);
     setVmNotice("");
     try {
-      const { vm: assigned } = await request<{ vm: number | null }>(
-        "/vm/claim",
-        {},
-      );
-      setVm(assigned);
-      if (assigned === null)
+      const d = await request<{ vm: number | null }>("/vm/claim", {});
+      setVm(d.vm);
+      if (d.vm === null)
         setVmNotice("All PCs are still taken. Check back soon.");
     } catch (e) {
-      setVmNotice(String(e));
+      setVmNotice(problem(e));
     } finally {
       setClaiming(false);
     }
   }
-  async function createSpace() {
-    const name = prompt("Name your Space");
-    if (name?.trim())
-      await act(() => request("/spaces", { name: name.trim() }));
-  }
   async function send() {
-    if (!draft.trim() || !selected) return;
-    const body = draft.trim();
-    setDraft("");
+    if (sending || !draft.trim() || !selected) return;
+    const space = selected,
+      body = draft.trim();
+    setSending(true);
+    setError("");
     try {
-      await request("/messages/" + selected, { body });
-      const d = await request<{ messages: Message[] }>("/messages/" + selected);
-      setMessages(d.messages);
+      await request("/messages/" + space, { body });
+      if (selectedRef.current === space) setDraft("");
+      const data = await request<{ messages: Message[] }>("/messages/" + space);
+      if (selectedRef.current === space) setMessages(data.messages);
     } catch (e) {
-      setError(String(e));
-      setDraft(body);
+      setError(problem(e));
+    } finally {
+      setSending(false);
     }
   }
-  async function loadFriends() {
+  function openForm(kind: FormKind) {
+    formSpace.current = selected;
+    setFormValue("");
+    setFormError("");
+    setFormLook(looks[selected] || DEFAULT_LOOK);
+    setForm(kind);
+    if (kind === "invite") void loadFriends();
+  }
+  async function submitForm(e: React.FormEvent) {
+    e.preventDefault();
+    if (formBusy || !form) return;
+    setFormBusy(true);
+    setFormError("");
+    setNotice("");
+    const space = formSpace.current;
     try {
-      setFriends(await request("/friends"));
+      if (form === "create") {
+        const { space: created } = await request<{ space: Space }>("/spaces", {
+          name: formValue.trim(),
+        });
+        setSpaces((old) => [...old, created]);
+        setSelected(created.id);
+        try {
+          setLooks(saveSpaceLook(userId, created.id, formLook));
+          setNotice("Your Space is ready. Invite a friend to join you.");
+        } catch {
+          setLooks((old) => ({ ...old, [created.id]: formLook }));
+          setNotice(
+            "Your Space is ready. This browser could not save its icon and colour.",
+          );
+        }
+        setTab("call");
+      } else if (form === "look") {
+        try {
+          setLooks(saveSpaceLook(userId, space, formLook));
+          setNotice("Your Space look is saved on this browser.");
+        } catch {
+          setLooks((old) => ({ ...old, [space]: formLook }));
+          setNotice(
+            "Your look is applied for now. This browser could not save it.",
+          );
+        }
+      } else if (form === "invite") {
+        await request("/invite/" + space, { username: formValue.trim() });
+        setNotice("Friend invited. They can now open this Space in Mao.");
+      } else {
+        await request("/friends", { username: formValue.trim() });
+        setNotice("Friend request sent. They’ll need to accept it.");
+        void loadFriends();
+      }
+      setForm(null);
     } catch (e) {
-      setError(String(e));
+      setFormError(problem(e));
+    } finally {
+      setFormBusy(false);
+    }
+  }
+  async function acceptFriend(requesterId: string) {
+    setError("");
+    try {
+      await request("/friends/accept", { requester_id: requesterId });
+      await loadFriends();
+      setNotice("You’re now friends. Invite them to a Space.");
+    } catch (e) {
+      setError(problem(e));
+    }
+  }
+  async function privacy(restricted: boolean) {
+    if (savingPrivacy) return;
+    setSavingPrivacy(true);
+    setError("");
+    try {
+      await request("/privacy", { restricted });
+      setProfile((old) =>
+        old ? { ...old, restricted_video: restricted } : old,
+      );
+      setNotice("Privacy setting saved.");
+    } catch (e) {
+      setError(problem(e));
+    } finally {
+      setSavingPrivacy(false);
     }
   }
   const current = spaces.find((s) => s.id === selected);
   const callSpace = spaces.find((s) => s.id === (liveSpace || selected));
-  const vmUrl = vm ? "https://vm" + vm + ".asanib.com" : null;
+  const acceptedFriends = friends.links
+    .filter((f) => f.status === "accepted")
+    .map((f) =>
+      friends.people.find(
+        (p) =>
+          p.user_id ===
+          (f.requester_id === userId ? f.addressee_id : f.requester_id),
+      ),
+    )
+    .filter((p): p is Friends["people"][number] => !!p);
   if (loading) return <div className="auth-screen">Opening Mao…</div>;
-  if (!profile)
+  if (profile === undefined)
     return (
       <div className="auth-screen">
         <div className="auth-card">
-          <img
-            className="brand-image"
-            src="/mao-logo.png"
-            alt="Mao"
-            onError={(e) => {
-              e.currentTarget.style.display = "none";
-            }}
-          />
-          <h1>Choose a username</h1>
-          <p>Your new Mao account is ready.</p>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void act(() => request("/profile", { username }));
+          <h1>Couldn’t open Mao</h1>
+          <p role="alert">{error}</p>
+          <button
+            className="primary"
+            onClick={() => {
+              setLoading(true);
+              void refresh();
             }}
           >
-            <input
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="Username"
-              minLength={3}
-              maxLength={24}
-              required
-            />
-            <button className="primary">Continue</button>
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+  if (profile === null)
+    return (
+      <div className="auth-screen">
+        <div className="auth-card">
+          <div className="logo">
+            mao<span className="dot">.</span>
+          </div>
+          <h1>What should we call you?</h1>
+          <p>
+            Choose a username so your friends can find you. Your PC will be
+            assigned automatically.
+          </p>
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (profileBusy) return;
+              setProfileBusy(true);
+              setError("");
+              try {
+                await request("/profile", { username });
+                await refresh();
+              } catch (e) {
+                setError(problem(e));
+              } finally {
+                setProfileBusy(false);
+              }
+            }}
+          >
+            <label>
+              Username
+              <input
+                value={username}
+                onChange={(e) => setUsername(e.target.value.toLowerCase())}
+                placeholder="your_username"
+                minLength={3}
+                maxLength={24}
+                pattern="[a-z0-9_]{3,24}"
+                required
+                autoComplete="username"
+              />
+            </label>
+            <small>3–24 lowercase letters, numbers, or underscores.</small>
+            <button className="primary" disabled={profileBusy}>
+              {profileBusy ? "Getting ready…" : "Let’s go"}
+            </button>
           </form>
-          {error && <p role="alert">{error}</p>}
+          {error && (
+            <p className="error" role="alert">
+              {error}
+            </p>
+          )}
         </div>
       </div>
     );
   return (
-    <div className="hangout-app">
+    <div
+      className={
+        "hangout-app " +
+        (tab === "desktop" ? "pc-mode " : "") +
+        (focused && tab === "desktop" ? "pc-focus" : "")
+      }
+    >
       <header className="app-header">
         <div className="logo">
           <img
@@ -191,39 +354,34 @@ export default function App({ userId }: { userId: string }) {
           </span>
         </div>
         <nav aria-label="Main">
-          <button
-            className={tab === "call" ? "on" : ""}
-            onClick={() => setTab("call")}
-          >
-            <Phone size={18} />
-            Hang out
-          </button>
-          <button
-            className={tab === "desktop" ? "on" : ""}
-            onClick={() => setTab("desktop")}
-          >
-            <Monitor size={18} />
-            My PC
-          </button>
-          <button
-            className={tab === "chat" ? "on" : ""}
-            onClick={() => setTab("chat")}
-          >
-            <MessageCircle size={18} />
-            Chat
-          </button>
+          {(
+            [
+              { id: "call", label: "Hang out", icon: Phone },
+              { id: "desktop", label: "My PC", icon: Monitor },
+              { id: "chat", label: "Chat", icon: MessageCircle },
+            ] as const
+          ).map((item) => (
+            <button
+              key={item.id}
+              className={tab === item.id ? "on" : ""}
+              aria-current={tab === item.id ? "page" : undefined}
+              onClick={() => setTab(item.id)}
+            >
+              <item.icon size={18} />
+              {item.label}
+            </button>
+          ))}
         </nav>
         <div className="header-actions">
           <button
-            aria-label="Friends"
-            title="Friends"
-            className={"round-button " + (tab === "friends" ? "on" : "")}
+            className={"friends-button " + (tab === "friends" ? "on" : "")}
             onClick={() => {
               setTab("friends");
               void loadFriends();
             }}
           >
-            <Users size={20} />
+            <Users size={19} />
+            <span>Friends</span>
           </button>
           <button
             aria-label="Privacy settings"
@@ -236,215 +394,273 @@ export default function App({ userId }: { userId: string }) {
         </div>
       </header>
       <main className="hangout-main">
-        <div className="hello-row">
-          <div>
-            <span className="hello-label">
-              HEY, {profile.username.toUpperCase()} ✦
-            </span>
-            <h1>
-              {tab === "desktop"
-                ? "Your PC. Your thing."
-                : tab === "chat"
+        {tab !== "desktop" && (
+          <div className="hello-row">
+            <div>
+              <span className="hello-label">
+                HEY, {profile.username.toUpperCase()} ✦
+              </span>
+              <h1>
+                {tab === "chat"
                   ? "Keep the chat going."
                   : tab === "friends"
                     ? "Better with friends."
                     : tab === "privacy"
                       ? "Your space, your rules."
                       : "Come on in."}
-            </h1>
-            <p>
-              {tab === "desktop"
-                ? "Play, make, browse. Your friends can stay on the call."
-                : tab === "chat"
-                  ? "Something to say? Drop it here."
+              </h1>
+              <p>
+                {tab === "chat"
+                  ? "A place for your conversations."
                   : tab === "friends"
                     ? "Find your people and bring them along."
                     : tab === "privacy"
                       ? "You choose what you share."
                       : "Grab a spot. Call your friends. Do your thing."}
-            </p>
+              </p>
+            </div>
+            <span className="hello-sticker" aria-hidden="true">
+              ✳
+            </span>
           </div>
-          <span className="hello-sticker" aria-hidden="true">
-            {tab === "desktop" ? "↗" : "✳"}
-          </span>
-        </div>
+        )}
         <div className="room-picker">
           <div className="room-chips">
-            {spaces.map((s) => (
-              <button
-                key={s.id}
-                className={"room-chip " + (s.id === selected ? "selected" : "")}
-                onClick={() => setSelected(s.id)}
-              >
-                <span className="room-dot" />
-                {s.name}
-              </button>
-            ))}
-            <button className="new-room" onClick={createSpace}>
+            {spaces.map((s) => {
+              const look = looks[s.id] || DEFAULT_LOOK;
+              return (
+                <button
+                  key={s.id}
+                  data-tone={look.tone}
+                  className={
+                    "room-chip " + (s.id === selected ? "selected" : "")
+                  }
+                  aria-pressed={s.id === selected}
+                  onClick={() => setSelected(s.id)}
+                >
+                  <span aria-hidden="true">
+                    <SpaceIcon name={look.icon} />
+                  </span>
+                  {s.name}
+                </button>
+              );
+            })}
+            <button className="new-room" onClick={() => openForm("create")}>
               <Plus size={16} />
               New space
             </button>
           </div>
-          <button
-            className="invite"
-            disabled={!selected}
-            onClick={async () => {
-              const name = prompt(
-                "Who’s joining? Enter your friend’s username.",
-              );
-              if (name && selected)
-                await act(() =>
-                  request("/invite/" + selected, { username: name }),
-                );
-            }}
-          >
-            <Plus size={16} />
-            Invite a friend
-          </button>
+          <div className="room-actions">
+            {current && (
+              <button
+                className="customize-button"
+                aria-label="Customise Space"
+                title="Choose this Space’s icon and colour"
+                onClick={() => openForm("look")}
+              >
+                <Palette size={17} />
+              </button>
+            )}
+            <button
+              className="invite"
+              disabled={!selected}
+              onClick={() => openForm("invite")}
+            >
+              <UserPlus size={16} />
+              Invite a friend
+            </button>
+          </div>
         </div>
+        {notice && (
+          <div className="notice" role="status">
+            <Check size={16} />
+            <span>{notice}</span>
+            <button
+              aria-label="Dismiss notification"
+              onClick={() => setNotice("")}
+            >
+              ×
+            </button>
+          </div>
+        )}
         {error && (
           <p role="alert" className="error">
             {error}
           </p>
         )}
+        {spaces.length === 0 && tab === "desktop" && (
+          <div className="welcome-tip">
+            <Headphones size={20} />
+            <div>
+              <strong>Your PC is your own. Bring some company?</strong>
+              <span>Create a Space to call and chat while you use it.</span>
+            </div>
+            <button onClick={() => openForm("create")}>
+              Create a Space
+              <ArrowRight size={16} />
+            </button>
+          </div>
+        )}
         <div
-          className={"workspace-grid " + (tab === "call" ? "call-focused" : "")}
+          className={
+            "workspace-grid " +
+            (tab === "call"
+              ? "call-focused"
+              : tab === "desktop"
+                ? "pc-layout"
+                : "")
+          }
         >
           <div className="workspace-view" hidden={tab === "call"}>
-            <div hidden={tab !== "desktop"} className="desktop card">
-              <div className="desktopbar">
-                <span>
-                  <Monitor size={15} />
-                  My PC
-                </span>
-                {vmUrl && (
-                  <a href={vmUrl} target="_blank" rel="noreferrer">
-                    Open in a new tab
-                    <ArrowUpRight size={15} />
-                  </a>
-                )}
-              </div>
-              {vmUrl ? (
-                <iframe
-                  title="Your Linux desktop"
-                  src={vmUrl}
-                  style={{ width: "100%", height: "65vh", border: 0 }}
-                  allow="clipboard-read; clipboard-write; fullscreen"
-                />
-              ) : (
-                <div className="desktopbody">
-                  <div className="desktopcontent">
-                    <Monitor size={48} />
-                    <h3>All PCs are taken right now</h3>
-                    <p>
-                      You’ll get a PC automatically when one is available. You
-                      can still call and chat while you wait.
-                    </p>
-                    <button
-                      className="primary"
-                      disabled={claiming}
-                      onClick={() => void retryVm()}
-                    >
-                      {claiming ? "Checking…" : "Check for a PC"}
-                    </button>
-                    {vmNotice && <p role="status">{vmNotice}</p>}
-                  </div>
-                </div>
-              )}
+            <div hidden={tab !== "desktop"}>
+              <Desktop
+                key={vm ?? "waiting"}
+                vm={vm}
+                active={tab === "desktop"}
+                focused={focused}
+                onFocus={() => setFocused((old) => !old)}
+                claiming={claiming}
+                notice={vmNotice}
+                onClaim={() => void retryVm()}
+              />
             </div>
-            {tab === "chat" && (
-              <div className="chatpanel card">
-                <div className="chatheading">
-                  {current?.name || "Your space"} · chat
+            {tab === "chat" &&
+              (!selected ? (
+                <div className="card onboarding-empty">
+                  <MessageCircle size={36} />
+                  <h2>Give your chat a home</h2>
+                  <p>
+                    Create a Space, then invite your friends. Your conversations
+                    and calls live together there.
+                  </p>
+                  <button
+                    className="primary"
+                    onClick={() => openForm("create")}
+                  >
+                    <Plus size={16} />
+                    Create a Space
+                  </button>
                 </div>
-                <div className="chatmessages">
-                  {messages.length === 0 && (
-                    <div className="chat-empty">
-                      <MessageCircle size={32} />
-                      <h3>It’s a little quiet here.</h3>
-                      <p>Be the first to say hey.</p>
-                    </div>
-                  )}
-                  {messages.map((m) => (
-                    <div className="msg" key={m.id}>
-                      <div className="avatar">
-                        {m.sender_id === userId ? "Y" : "F"}
+              ) : (
+                <div className="chatpanel card">
+                  <div className="chatheading">
+                    <span aria-hidden="true">
+                      <SpaceIcon
+                        name={(looks[selected] || DEFAULT_LOOK).icon}
+                      />
+                    </span>
+                    {current?.name} · chat
+                  </div>
+                  <div className="chatmessages">
+                    {messages.length === 0 && (
+                      <div className="chat-empty">
+                        <MessageCircle size={32} />
+                        <h3>Say hey to your Space.</h3>
+                        <p>Your first conversation starts here.</p>
+                        <button
+                          className="text-button"
+                          onClick={() => openForm("invite")}
+                        >
+                          Invite a friend
+                        </button>
                       </div>
-                      <div>
-                        <div className="msgmeta">
-                          <b>{m.sender_id === userId ? "You" : "Member"}</b>
+                    )}
+                    {messages.map((m) => (
+                      <div className="msg" key={m.id}>
+                        <div className="avatar">
+                          {m.sender_id === userId ? "Y" : "F"}
                         </div>
-                        <p>{m.body}</p>
+                        <div>
+                          <div className="msgmeta">
+                            <b>{m.sender_id === userId ? "You" : "Member"}</b>
+                          </div>
+                          <p>{m.body}</p>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
+                  <form
+                    className="composer"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      void send();
+                    }}
+                  >
+                    <input
+                      aria-label="Message"
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      placeholder="Say something…"
+                      maxLength={4000}
+                      disabled={sending}
+                    />
+                    <button disabled={sending || !draft.trim()}>
+                      {sending ? "Sending…" : "Send ↗"}
+                    </button>
+                  </form>
                 </div>
-                <form
-                  className="composer"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    void send();
-                  }}
-                >
-                  <input
-                    aria-label="Message"
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    placeholder="Say something…"
-                    disabled={!selected}
-                  />
-                  <button disabled={!selected || !draft.trim()}>Send ↗</button>
-                </form>
-              </div>
-            )}
+              ))}
             {tab === "friends" && (
               <div className="card settingspanel">
-                <h3>Your people</h3>
-                <button
-                  className="primary"
-                  onClick={() => {
-                    const name = prompt("Your friend’s username");
-                    if (name)
-                      void act(async () => {
-                        await request("/friends", { username: name });
-                        await loadFriends();
-                      });
-                  }}
-                >
-                  <Plus size={16} />
-                  Add a friend
-                </button>
-                {friends.links.length === 0 && (
-                  <p>No friends added yet. Find someone by their username.</p>
-                )}
-                {friends.links.map((f, i) => (
-                  <div className="settingrow" key={i}>
-                    <span>
-                      {friends.people.find(
-                        (p) =>
-                          p.user_id ===
-                          (f.requester_id === userId
-                            ? f.addressee_id
-                            : f.requester_id),
-                      )?.username || "User"}{" "}
-                      — {f.status}
-                    </span>
-                    {f.status === "pending" && f.addressee_id === userId && (
-                      <button
-                        onClick={() =>
-                          void act(async () => {
-                            await request("/friends/accept", {
-                              requester_id: f.requester_id,
-                            });
-                            await loadFriends();
-                          })
-                        }
-                      >
-                        Accept
-                      </button>
-                    )}
+                <div className="section-heading">
+                  <div>
+                    <h3>Your people</h3>
+                    <p>
+                      Your username is <strong>@{profile.username}</strong>.
+                      Share it with your friends.
+                    </p>
                   </div>
-                ))}
+                  <button
+                    className="primary"
+                    onClick={() => openForm("friend")}
+                  >
+                    <Plus size={16} />
+                    Add a friend
+                  </button>
+                </div>
+                {friends.links.length === 0 && (
+                  <div className="chat-empty">
+                    <Users size={32} />
+                    <h3>Save a spot for someone.</h3>
+                    <p>
+                      Add them by username. Once they accept, you can invite
+                      them to your Space.
+                    </p>
+                  </div>
+                )}
+                {friends.links.map((f, i) => {
+                  const person = friends.people.find(
+                    (p) =>
+                      p.user_id ===
+                      (f.requester_id === userId
+                        ? f.addressee_id
+                        : f.requester_id),
+                  );
+                  return (
+                    <div className="settingrow" key={i}>
+                      <div className="avatar">
+                        {person?.username[0].toUpperCase() || "?"}
+                      </div>
+                      <div className="friend-name">
+                        <strong>@{person?.username || "User"}</strong>
+                        <small>
+                          {f.status === "accepted"
+                            ? "Friends"
+                            : f.requester_id === userId
+                              ? "Request sent"
+                              : "Wants to be your friend"}
+                        </small>
+                      </div>
+                      {f.status === "pending" && f.addressee_id === userId && (
+                        <button
+                          onClick={() => void acceptFriend(f.requester_id)}
+                        >
+                          Accept
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
             {tab === "privacy" && (
@@ -460,12 +676,9 @@ export default function App({ userId }: { userId: string }) {
                 <label className="settingrow">
                   <input
                     type="checkbox"
+                    disabled={savingPrivacy}
                     checked={profile.restricted_video}
-                    onChange={(e) =>
-                      void act(() =>
-                        request("/privacy", { restricted: e.target.checked }),
-                      )
-                    }
+                    onChange={(e) => void privacy(e.target.checked)}
                   />
                   Keep my camera off
                 </label>
@@ -479,7 +692,9 @@ export default function App({ userId }: { userId: string }) {
               </div>
             )}
           </div>
-          <aside className="call-panel">
+          <aside
+            className={"call-panel " + (tab === "desktop" ? "call-dock" : "")}
+          >
             {callSpace ? (
               <Call
                 key={callSpace.id}
@@ -491,11 +706,17 @@ export default function App({ userId }: { userId: string }) {
                 onJoined={(joined) => setLiveSpace(joined ? callSpace.id : "")}
               />
             ) : (
-              <div className="empty-space">
-                <Headphones size={42} />
-                <h3>Save a spot for your friends.</h3>
-                <p>Make a Space and invite your people.</p>
-                <button className="primary" onClick={createSpace}>
+              <div
+                className={
+                  "empty-space " + (tab === "desktop" ? "empty-call-dock" : "")
+                }
+              >
+                <Headphones size={32} />
+                <div>
+                  <h3>Better with company.</h3>
+                  <p>Create a Space, invite a friend, and hang out.</p>
+                </div>
+                <button className="primary" onClick={() => openForm("create")}>
                   <Plus size={16} />
                   Create a Space
                 </button>
@@ -509,8 +730,133 @@ export default function App({ userId }: { userId: string }) {
             )}
           </aside>
         </div>
-        <p className="app-footnote">Your own little corner of the internet.</p>
+        {tab !== "desktop" && (
+          <p className="app-footnote">
+            Your own little corner of the internet.
+          </p>
+        )}
       </main>
+      {form && (
+        <Modal
+          title={
+            form === "create"
+              ? "Make a Space"
+              : form === "invite"
+                ? "Invite a friend"
+                : form === "friend"
+                  ? "Find your friend"
+                  : "Make it yours"
+          }
+          onClose={() => setForm(null)}
+          busy={formBusy}
+        >
+          <form className="dialog-form" onSubmit={(e) => void submitForm(e)}>
+            {form === "create" ? (
+              <>
+                <p>A place for your people. Give it a name.</p>
+                <label>
+                  Space name
+                  <input
+                    autoFocus
+                    value={formValue}
+                    onChange={(e) => setFormValue(e.target.value)}
+                    placeholder="The after-school hangout"
+                    maxLength={80}
+                    required
+                  />
+                </label>
+                <SpaceLookPicker look={formLook} onChange={setFormLook} />
+                <small>
+                  Your icon and colour are personal to this browser.
+                </small>
+              </>
+            ) : form === "look" ? (
+              <>
+                <p>Choose how this Space looks to you.</p>
+                <SpaceLookPicker look={formLook} onChange={setFormLook} />
+                <small>Saved on this browser, just for your account.</small>
+              </>
+            ) : (
+              <>
+                <p>
+                  {form === "invite"
+                    ? "Invite an accepted friend to this Space. You can both call and chat here."
+                    : "Enter their Mao username. They’ll need to accept your request before you can invite them to a Space."}
+                </p>
+                <label>
+                  Friend’s username
+                  <input
+                    autoFocus
+                    value={formValue}
+                    onChange={(e) => setFormValue(e.target.value.toLowerCase())}
+                    placeholder="their_username"
+                    minLength={3}
+                    maxLength={24}
+                    pattern="[a-z0-9_]{3,24}"
+                    required
+                    autoComplete="off"
+                  />
+                </label>
+                {form === "invite" && acceptedFriends.length > 0 && (
+                  <div className="friend-suggestions">
+                    {acceptedFriends.map((p) => (
+                      <button
+                        type="button"
+                        key={p.user_id}
+                        onClick={() => setFormValue(p.username)}
+                      >
+                        @{p.username}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {form === "invite" && acceptedFriends.length === 0 && (
+                  <p className="form-tip">
+                    No accepted friends yet?{" "}
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() => openForm("friend")}
+                    >
+                      Add a friend first
+                    </button>
+                  </p>
+                )}
+              </>
+            )}
+            {formError && (
+              <p className="error" role="alert">
+                {formError}
+              </p>
+            )}
+            <div className="dialog-actions">
+              <button
+                className="secondary"
+                type="button"
+                disabled={formBusy}
+                onClick={() => setForm(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="primary"
+                type="submit"
+                disabled={formBusy || (form !== "look" && !formValue.trim())}
+              >
+                {formBusy
+                  ? "One moment…"
+                  : form === "create"
+                    ? "Create Space"
+                    : form === "invite"
+                      ? "Send invite"
+                      : form === "friend"
+                        ? "Send friend request"
+                        : "Save look"}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
     </div>
   );
 }

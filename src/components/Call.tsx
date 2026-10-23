@@ -10,6 +10,8 @@ import {
   Phone,
   Headphones,
   Users,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { request } from "../lib/supabase";
 type Client = ReturnType<typeof ZoomVideo.createClient>;
@@ -53,6 +55,7 @@ export default function Call({
     listeners = useRef<(() => void)[]>([]);
   const attached = useRef(new Map<number, HTMLElement>()),
     renderQueue = useRef(Promise.resolve());
+  const [expanded, setExpanded] = useState(false);
   const [joined, setJoined] = useState(false),
     [busy, setBusy] = useState(false),
     [mic, setMic] = useState(false),
@@ -184,6 +187,7 @@ export default function Call({
           shareHost.current?.replaceChildren();
         });
         listen("active-share-change", (event) => {
+          if (event.state === "Active") setExpanded(true);
           void runShareView(event.state === "Active" ? event.userId : 0);
         });
         await checked(
@@ -258,6 +262,7 @@ export default function Call({
       if (!client || restricted) return;
       const stream = client.getMediaStream();
       await checked(cam ? stream.stopVideo() : stream.startVideo());
+      if (!cam) setExpanded(true);
       sync(client);
     });
   }
@@ -282,6 +287,7 @@ export default function Call({
         try {
           await checked(stream.startShareScreen(element));
           setSharing(true);
+          setExpanded(true);
         } catch (e) {
           element.remove();
           throw e;
@@ -307,7 +313,11 @@ export default function Call({
   }, [restricted]);
   return (
     <section
-      className={"call-room " + (compact ? "compact" : "")}
+      className={
+        "call-room " +
+        (compact ? "compact " : "") +
+        (compact && !expanded ? "call-collapsed" : "")
+      }
       aria-label="Zoom call"
     >
       <div className="call-room-heading">
@@ -319,8 +329,18 @@ export default function Call({
           <i />
           {status}
         </span>
+        {compact && (
+          <button
+            className="video-toggle"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((old) => !old)}
+          >
+            {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+            <span>{expanded ? "Hide video" : "Show video"}</span>
+          </button>
+        )}
       </div>
-      <div className="call-stage">
+      <div className="call-stage" hidden={compact && !expanded}>
         <div className="call-stage-placeholder">
           <div className="call-stage-icon">
             <Headphones size={36} />
